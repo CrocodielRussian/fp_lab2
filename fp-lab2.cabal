@@ -1,0 +1,63 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.37.0.
+--
+-- see: https://github.com/sol/hpack
+
+name:           fp-lab2
+version:        0.1.0.0
+homepage:       https://github.com/yourname/fp_lab2#readme
+bug-reports:    https://github.com/yourname/fp_lab2/issues
+author:         Croco
+maintainer:     you@example.com
+license:        MIT
+license-file:   LICENSE
+build-type:     Simple
+
+source-repository head
+  type: git
+  location: https://github.com/yourname/fp_lab2
+
+library
+  exposed-modules:
+      Structure
+  other-modules:
+      Paths_fp_lab2
+  hs-source-dirs:
+      src
+  ghc-options: -Wall
+  build-depends:
+      base >=4.14 && <5
+    , hashable >=1.4.3.0
+    , vector >=0.13.1.0
+  default-language: Haskell2010
+
+executable fp-lab2-exe
+  main-is: Main.hs
+  other-modules:
+      Paths_fp_lab2
+  hs-source-dirs:
+      app
+  ghc-options: -Wall
+  build-depends:
+      base >=4.14 && <5
+    , fp-lab2
+    , hashable >=1.4.3.0
+    , vector >=0.13.1.0
+  default-language: Haskell2010
+
+test-suite unit
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  other-modules:
+      Paths_fp_lab2
+  hs-source-dirs:
+      test
+  ghc-options: -Wall -Wall
+  build-depends:
+      HUnit
+    , base
+    , fp-lab2
+    , hashable >=1.4.3.0
+    , vector >=0.13.1.0
+  default-language: Haskell2010

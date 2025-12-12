@@ -1,0 +1,37 @@
+name: fp-lab2
+version: 0.1.0.0
+github: yourname/fp_lab2
+license: MIT
+author: Croco
+maintainer: you@example.com
+extra-source-files: []
+
+ghc-options:
+  - -Wall
+
+dependencies:
+  - base >= 4.14 && < 5
+  - hashable >= 1.4.3.0
+  - vector >= 0.13.1.0
+
+library:
+  source-dirs: [src]
+
+executables:
+  fp-lab2-exe:
+    main: Main.hs
+    source-dirs: app
+    dependencies:
+      - fp-lab2
+
+tests:
+  unit:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+      - -Wall
+    dependencies:
+      - base
+      - HUnit
+      - fp-lab2
+      #  - hspec

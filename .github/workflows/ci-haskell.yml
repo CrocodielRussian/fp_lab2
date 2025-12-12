@@ -1,0 +1,61 @@
+name: Haskell CI
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/*"
+      - "**/*.hs"
+      - "**/*.cabal"
+      - "stack.yaml"
+      - "package.yaml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/*"
+      - "**/*.hs"
+      - "**/*.cabal"
+      - "stack.yaml"
+      - "package.yaml"
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell/actions/setup@v2
+        with:
+          ghc-version: 9.10.3
+          enable-stack: true
+      - name: install hlint
+        run: stack install hlint 
+      - name: run lint
+        run: hlint src/*.hs
+
+  format:
+    runs-on: ubuntu-latest
+    needs: [lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell/actions/setup@v2
+        with:
+          ghc-version: 9.10.3
+          enable-stack: true
+      - name: install ormolu
+        run: stack install ormolu
+      - name: auto format
+        run: ormolu -i src/*.hs
+      - name: run formatter cheks
+        run: ormolu --mode check src/*.hs
+      
+
+  test:
+    needs: [format]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell/actions/setup@v2
+        with:
+          ghc-version: 9.10.3
+          enable-stack: true
+      - run: stack test
