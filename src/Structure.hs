@@ -8,6 +8,10 @@ module Structure
   , delete
   , toList
   , powerTwo
+  , mapOA
+  , filterOA
+  , foldlOA
+  , foldrOA
   ) where
 
 import Control.Monad (forM_, forM, when)
@@ -174,3 +178,27 @@ toList st = do
     case s of
       Occupied k -> return [k]
       _ -> return []
+
+mapOA :: (Eq a, Hashable a, Eq b, Hashable b) => (a -> b) -> OASet a -> IO (OASet b)
+mapOA f s = do
+  xs <- toList s
+  t  <- newOASet (max 4 (length xs * 2))
+  forM_ (map f xs) (insert t)
+  pure t
+
+filterOA :: (Eq a, Hashable a) => (a -> Bool) -> OASet a -> IO (OASet a)
+filterOA p s = do
+  xs <- toList s
+  t  <- newOASet (max 4 (length xs * 2))
+  forM_ (filter p xs) (insert t)
+  pure t
+
+foldlOA :: (b -> a -> b) -> b -> OASet a -> IO b
+foldlOA f z s = do
+  xs <- toList s
+  pure (foldl f z xs)
+
+foldrOA :: (a -> b -> b) -> b -> OASet a -> IO b
+foldrOA f z s = do
+  xs <- toList s
+  pure (foldr f z xs)
