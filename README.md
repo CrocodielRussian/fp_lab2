@@ -8,30 +8,33 @@
 
 # Реализация
 
-## [Структура HS](src/Structure.hs)
+## [Структура OASet](src/Structure.hs)
 
 Само множество: 
 ```haskell
-data Slot k = Empty | Deleted | Occupied k
-  deriving (Show, Eq)
+
+data State = Empty | Deleted | Occupied
+  deriving (Eq, Show)
+
+data Slot k = Slot
+  { slotState :: State
+  , slotKey   :: k
+  } deriving (Show)
 
 
-data OASet k = OASet
-  { vecRef    :: IORef (IOVector (Slot k)) 
-  , sizeRef   :: IORef Int                 
-  , tombRef   :: IORef Int                 
-  }
-
+data Slots k = Slots
+  { capacity   :: Int
+  , size       :: Int
+  , tombstones :: Int
+  , slots      :: Vector (Slot k)
+  } deriving (Show)
 
 ```
 является "списком списков", то есть бакетов состоящих из элементов.
 Позиция (бакет, в который нужно добавить) каждого элемента вычисляется при помощи hash-функции, что обеспечивает быстрый доступ к элементам.
 
-
-
-
 Основные операции:
-- `addElement` / `deleteElement` — добавление и удаление с автоматической нормализацией.
+- `insert` / `delete` — добавление и удаление с автоматической нормализацией.
 - `filterHS` / `mapHS` — функциональные преобразования без протечки внутреннего представления.
 - `foldlHS` / `foldrHS` — свертки по бакетам.
 - `memberHS` — проверка принадлежности за счёт адресации по хешу.
@@ -39,30 +42,44 @@ data OASet k = OASet
 
 **`insert`**
 ```haskell
-insert :: (Eq k, Hashable k) => OASet k -> k -> IO Bool
-insert st key = do
-  v <- readIORef (vecRef st)
-  let cap = MV.length v
-      start = hash key .&. (cap - 1)
-  res <- probeInsert v cap start 0 Nothing key
-  case res of
-    Left True -> return False
-    Left False -> do
-      rehash st (cap * 2)
-      insert st key
-    Right pos -> do
-      prev <- MV.read v pos
-      when (prev == Deleted) $ modifyIORef' (tombRef st) (subtract 1)
-      MV.write v pos (Occupied key)
-      modifyIORef' (sizeRef st) (+1)
+insert :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
+insert st = insertLoop (oaBalance st)
 
-      sz <- readIORef (sizeRef st)
-      tb <- readIORef (tombRef st)
-      let capD = MV.length v
-          load = fromIntegral (sz + tb) / fromIntegral capD
-      when (load > loadFactorThreshold) $
-        rehash st (capD * 2)
-      return True
+insertLoop :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
+insertLoop s key = go (startIndex s key) 0 Nothing
+  where
+    cap = capacity s
+
+    go i probe firstDel
+      | probe >= cap = (s, False)
+      | otherwise =
+          case slots s V.! i of
+            Slot Empty _ ->
+              let pos = Data.Maybe.fromMaybe i firstDel
+               in ( s { size       = size s + 1
+                      , tombstones =
+                          if isNothing firstDel
+                          then tombstones s
+                          else tombstones s - 1
+                      , slots =
+                          slots s V.// [(pos, Slot Occupied key)]
+                      }
+                  , True
+                  )
+
+            Slot Deleted _ ->
+              go ((i + 1) .&. (cap - 1))
+                 (probe + 1)
+                 (case firstDel of
+                    Nothing -> Just i
+                    _       -> firstDel)
+
+            Slot Occupied k
+              | k == key -> (s, False)
+              | otherwise ->
+                  go ((i + 1) .&. (cap - 1))
+                     (probe + 1)
+                     firstDel
 ```
 
 
@@ -75,26 +92,36 @@ insert st key = do
 **`delete`**
 
 ```haskell
-delete :: (Eq k, Hashable k) => OASet k -> k -> IO Bool
+delete :: (Eq k, Hashable k) =>  Slots k -> k -> (Slots k, Bool)
 delete st key = do
-  v <- readIORef (vecRef st)
-  let cap = MV.length v
-      start = hash key .&. (cap - 1)
-  probe v cap start 0
-  where
-    probe v cap i cnt
-      | cnt >= cap = return False
-      | otherwise = do
-          s <- MV.read v i
-          case s of
-            Empty -> return False
-            (Occupied k') | k' == key -> do
-              MV.write v i Deleted
-              modifyIORef' (sizeRef st) (subtract 1)
-              modifyIORef' (tombRef st) (+1)
-              return True
-            _ -> probe v cap ((i + 1) .&. (cap - 1)) (cnt + 1)
+    case deleteLoop st key of
+      (s', True)  -> (oaBalance s', True)
+      result     -> result
 
+deleteLoop :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
+deleteLoop s key = go (startIndex s key) 0
+  where
+    cap = capacity s
+
+    go i probe
+      | probe >= cap = (s, False)
+      | otherwise =
+          case slots s V.! i of
+            Slot Empty _ ->
+              (s, False)
+
+            Slot Occupied k
+              | k == key ->
+                  ( s { size       = size s - 1
+                      , tombstones = tombstones s + 1
+                      , slots =
+                          slots s V.// [(i, Slot Deleted undefined)]
+                      }
+                  , True
+                  )
+
+            _ ->
+              go ((i + 1) .&. (cap - 1)) (probe + 1)
 ```
 
 аналогично addElement, но возвращается обновленная структура без заданного элемента.
@@ -102,48 +129,30 @@ delete st key = do
 
 **`filterHS`**
 ```haskell
-filterHS :: (Hashable a) => (a -> Bool) -> HS a -> HS a
-filterHS p hs =
-  let (buckets', newSize) = filterBuckets p (buckets hs)
-      updated = hs {buckets = buckets', size = newSize}
-   in normalizeHS updated
-   
-
-
-filterBuckets :: (a -> Bool) -> Buckets a -> (Buckets a, Int)
-filterBuckets _ BucketsNil = (BucketsNil, 0)
-filterBuckets p (BucketsCons bucket rest) =
-  let (bucket', keptInBucket) = filterBucket p bucket
-      (rest', keptInRest) = filterBuckets p rest
-   in (BucketsCons bucket' rest', keptInBucket + keptInRest)
-
-filterBucket :: (a -> Bool) -> Bucket a -> (Bucket a, Int)
-filterBucket _ BNil = (BNil, 0)
-filterBucket p (BCons y ys)
-  | p y =
-      let (ys', count) = filterBucket p ys
-       in (BCons y ys', count + 1)
-  | otherwise = filterBucket p ys
+filterOA :: (Eq k, Hashable k) => (k -> Bool) -> Slots k -> Slots k
+filterOA p s =
+  rehash $
+    foldlOA step (initSlots (capacity s)) s
+  where
+    step acc k
+      | p k       = fst (oaInsertRaw acc k)
+      | otherwise = acc
 ```
 
 оставляем те эелементы, которые соответствуют предикату.
 
 **`mapHS`**
 ```haskell
-mapHS :: (Hashable b) => (a -> b) -> HS a -> HS b
-mapHS f hs = normalizeHS (mapBuckets f (buckets hs) (emptyHS (bucketCount hs)))
-
-mapBuckets :: (Hashable b) => (a -> b) -> Buckets a -> HS b -> HS b
-mapBuckets _ BucketsNil acc = acc
-mapBuckets f (BucketsCons bucket rest) acc =
-  let acc' = mapBucket f bucket acc
-   in mapBuckets f rest acc'
-
-mapBucket :: (Hashable b) => (a -> b) -> Bucket a -> HS b -> HS b
-mapBucket _ BNil acc = acc
-mapBucket f (BCons bucketHead bucketTail) acc =
-  let acc' = insertInternal True (f bucketHead) acc
-   in mapBucket f bucketTail acc'
+mapOA :: (Eq k2, Hashable k2)
+      => (k1 -> k2)
+      -> Slots k1
+      -> Slots k2
+mapOA f s =
+  rehash $
+    foldlOA step (initSlots (capacity s)) s
+  where
+    step acc k =
+      fst (oaInsertRaw acc (f k))
 ```
 
 применяем функцию к элементам исходного множества и всталяем в новое множество (это необходимо для того, чтобы высчитать хэш на основе новых значений после применения функции)
@@ -151,63 +160,48 @@ mapBucket f (BCons bucketHead bucketTail) acc =
 
 **`foldlHS/foldrHS`**
 ```haskell
-foldlHS :: (b -> a -> b) -> b -> HS a -> b
-foldlHS f z hs = foldlBuckets f z (buckets hs)
+foldlOA :: (a -> k -> a) -> a -> Slots k -> a
+foldlOA f z s = 
+    V.foldl' step z (slots s)
+  where
+    step acc (Slot Occupied k) = f acc k
+    step acc _                = acc
 
-foldrHS :: (a -> b -> b) -> b -> HS a -> b
-foldrHS f z hs = foldrBuckets f z (buckets hs)
+foldrOA :: (k -> a -> a) -> a -> Slots k -> a
+foldrOA f z s = 
+  V.foldr step z (slots s)
+  where
+    step (Slot Occupied k) acc = f k acc
+    step _ acc                = acc
 
-foldlBuckets :: (b -> a -> b) -> b -> Buckets a -> b
-foldlBuckets _ acc BucketsNil = acc
-foldlBuckets f acc (BucketsCons bucket rest) =
-  let acc' = foldlBucket f acc bucket
-   in foldlBuckets f acc' rest
-
-foldlBucket :: (b -> a -> b) -> b -> Bucket a -> b
-foldlBucket _ acc BNil = acc
-foldlBucket f acc (BCons y ys) =
-  let acc' = f acc y
-   in foldlBucket f acc' ys
-
-foldrBuckets :: (a -> b -> b) -> b -> Buckets a -> b
-foldrBuckets _ acc BucketsNil = acc
-foldrBuckets f acc (BucketsCons bucket rest) =
-  let accRest = foldrBuckets f acc rest
-   in foldrBucket f accRest bucket
-
-foldrBucket :: (a -> b -> b) -> b -> Bucket a -> b
-foldrBucket _ acc BNil = acc
-foldrBucket f acc (BCons y ys) =
-  f y (foldrBucket f acc ys)
 ```
 
 
 
 
-## [Тестирование](test/Main.hs)
+## [Тестирование](test/Spec.hs)
 ### Unit-тесты (HUnit)
 ```haskell
-unitTests :: Test
-unitTests = TestList
-  [ TestLabel "insert" testInsertPreservesMembership
-  , TestLabel "delete" testDeleteRemovesMembership
-  , TestLabel "filter" testFilterKeepsOnlyMatching
-  , TestLabel "fold" testFoldAggregatesValues
+tests :: Test
+tests = TestList
+  [ TestLabel "powerTwo edge cases" test_powerTwo
+  , TestLabel "initSlots empty" test_initSlots
+  , TestLabel "insert/member basic" test_insertMember
+  , TestLabel "insert duplicate" test_insertDuplicate
+  , TestLabel "delete present" test_deletePresent
+  , TestLabel "delete missing" test_deleteMissing
+  , TestLabel "toList/fromList set semantics" test_toListFromList
+  , TestLabel "stress insert many (resize/rehash)" test_stress
+  , TestLabel "map transforms elements" test_mapTransforms
+  , TestLabel "filter keeps matching elements" test_filterKeepsMatching
+  , TestLabel "filter removes all elements" test_filterRemovesAll
+  , TestLabel "foldl sums elements" test_foldlSums
+  , TestLabel "foldr concatenates strings" test_foldrConcats
+  , TestLabel "foldl on empty set" test_foldlEmpty
+  , TestLabel "map on empty set" test_mapEmpty
   ]
 ```
 Покрывают корректность вставки, удаления, фильтрации и свертки.
 
-### Property-based (QuickCheck)
-```haskell
-prop_monoidAssociativity :: IntSet -> IntSet -> IntSet -> Bool
-prop_monoidAssociativity (IntSet a) (IntSet b) (IntSet c) =
-  (a <> b) <> c == a <> (b <> c)
-```
-Свойства включают:
-- Левую и правую нейтральность `mempty`.
-- Ассоциативность `(<>)`.
-- Совпадение `filterHS` и `mapHS` с эталонным поведением списков.
-
-
 # Итог
-Создана неизменяемая полиморфная структура данных, удовлетворяющая требованиям моноида, с операциями добавления/удаления, фильтрации, отображения и сверток. Реализованы эффективное сравнение без преобразования к спискам и подробное тестирование: HUnit проверяет базовые сценарии, QuickCheck — свойства структуры и API.
+Создана неизменяемая полиморфная структура данных, удовлетворяющая требованиям моноида, с операциями добавления/удаления, фильтрации, отображения и сверток. Реализованы эффективное сравнение без преобразования к спискам и подробное тестирование: HUnit проверяет базовые сценарии.

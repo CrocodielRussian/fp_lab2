@@ -36,12 +36,12 @@ tests = TestList
   , TestLabel "toList/fromList set semantics" test_toListFromList
   , TestLabel "stress insert many (resize/rehash)" test_stress
   , TestLabel "map transforms elements" test_mapTransforms
-    , TestLabel "filter keeps matching elements" test_filterKeepsMatching
-    , TestLabel "filter removes all elements" test_filterRemovesAll
-    , TestLabel "foldl sums elements" test_foldlSums
-    , TestLabel "foldr concatenates strings" test_foldrConcats
-    , TestLabel "foldl on empty set" test_foldlEmpty
-    , TestLabel "map on empty set" test_mapEmpty
+  , TestLabel "filter keeps matching elements" test_filterKeepsMatching
+  , TestLabel "filter removes all elements" test_filterRemovesAll
+  , TestLabel "foldl sums elements" test_foldlSums
+  , TestLabel "foldr concatenates strings" test_foldrConcats
+  , TestLabel "foldl on empty set" test_foldlEmpty
+  , TestLabel "map on empty set" test_mapEmpty
   ]
 
 test_powerTwo :: Test
