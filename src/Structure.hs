@@ -16,6 +16,7 @@ module Structure
 
 import Data.Bits
 import Data.Hashable
+import Data.Maybe
 import qualified Data.Vector as V
 import Data.Vector (Vector)
 
@@ -101,7 +102,7 @@ initSlots n = do
     }
 
 getSize :: Slots k -> Int
-getSize s = size s
+getSize = size
 
 rehash :: (Eq k, Hashable k) => Slots k -> Slots k
 rehash s = do
@@ -156,7 +157,7 @@ oaInsertRaw st key = go (startIndex st key) 0
               )
 
 insert :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
-insert st key = insertLoop (oaBalance st) key
+insert st = insertLoop (oaBalance st)
 
 insertLoop :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
 insertLoop s key = go (startIndex s key) 0 Nothing
@@ -168,10 +169,10 @@ insertLoop s key = go (startIndex s key) 0 Nothing
       | otherwise =
           case slots s V.! i of
             Slot Empty _ ->
-              let pos = maybe i id firstDel
+              let pos = Data.Maybe.fromMaybe i firstDel
                in ( s { size       = size s + 1
                       , tombstones =
-                          if firstDel == Nothing
+                          if isNothing firstDel
                           then tombstones s
                           else tombstones s - 1
                       , slots =
@@ -227,8 +228,7 @@ deleteLoop s key = go (startIndex s key) 0
               go ((i + 1) .&. (cap - 1)) (probe + 1)
 
 toList :: Slots k -> [k]
-toList s =
-  foldrOA (:) [] s
+toList = foldrOA (:) []
 
 fromList :: (Eq k, Hashable k) => Int -> [k] -> Slots k
 fromList cap =
