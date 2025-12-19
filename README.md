@@ -1,194 +1,213 @@
-# Assignment 1: Basics of Haskell
+# Assignment 2: Write Open Addres Set
 
 
 ## Киселёв Михаил Васильевич
-- Первая задача [Первая задача](https://projecteuler.net/problem=21) 
-- Вторая задача [Вторая задача](https://projecteuler.net/problem=9)
 
-## [Первая задача](https://projecteuler.net/problem=21)
-Реализация через рекурсию: 
+- Хэш-множество (неизменяемая полиморфная структура данных) [src/Structure.hs](src/Structure.hs)
+- Тестирование (unit + property-based) [test/Main.hs](test/Main.hs)
+
+# Реализация
+
+## [Структура HS](src/Structure.hs)
+
+Само множество: 
 ```haskell
-divisionSumRec' :: Int -> Int -> Int
-divisionSumRec' n division
-    | division > n `div` 2 = 0
-    | n `mod` division == 0 = (+) division (divisionSumRec' n (division + 1) )
-    | otherwise = divisionSumRec' n (division + 1)
+data Slot k = Empty | Deleted | Occupied k
+  deriving (Show, Eq)
 
-amicableNumbersSumRec' :: Int -> Int
-amicableNumbersSumRec' a
-    | a > 10000 = 0
-    | a == sum_b && a /= b = (+) (a + b) (amicableNumbersSumRec' (a+1))
-    | otherwise = amicableNumbersSumRec' (a+1)
-        where b = divisionSumRec' a 1
-              sum_b = divisionSumRec' b 1
+
+data OASet k = OASet
+  { vecRef    :: IORef (IOVector (Slot k)) 
+  , sizeRef   :: IORef Int                 
+  , tombRef   :: IORef Int                 
+  }
+
+
 ```
-Реализация через хвостовую рекурсию: 
+является "списком списков", то есть бакетов состоящих из элементов.
+Позиция (бакет, в который нужно добавить) каждого элемента вычисляется при помощи hash-функции, что обеспечивает быстрый доступ к элементам.
+
+
+
+
+Основные операции:
+- `addElement` / `deleteElement` — добавление и удаление с автоматической нормализацией.
+- `filterHS` / `mapHS` — функциональные преобразования без протечки внутреннего представления.
+- `foldlHS` / `foldrHS` — свертки по бакетам.
+- `memberHS` — проверка принадлежности за счёт адресации по хешу.
+
+
+**`insert`**
 ```haskell
-divisionSumRecTail' :: Int -> Int -> Int -> Int
-divisionSumRecTail' n division acc
-    | division > n `div` 2 = acc
-    | n `mod` division == 0 = divisionSumRecTail' n (division + 1) (acc + division)
-    | otherwise = divisionSumRecTail' n (division + 1) acc
+insert :: (Eq k, Hashable k) => OASet k -> k -> IO Bool
+insert st key = do
+  v <- readIORef (vecRef st)
+  let cap = MV.length v
+      start = hash key .&. (cap - 1)
+  res <- probeInsert v cap start 0 Nothing key
+  case res of
+    Left True -> return False
+    Left False -> do
+      rehash st (cap * 2)
+      insert st key
+    Right pos -> do
+      prev <- MV.read v pos
+      when (prev == Deleted) $ modifyIORef' (tombRef st) (subtract 1)
+      MV.write v pos (Occupied key)
+      modifyIORef' (sizeRef st) (+1)
 
-amicableNumbersSumRecTail' :: Int -> Int -> Int
-amicableNumbersSumRecTail' a acc
-    | a > 10000 = acc
-    | a == sum_b && a /= b = amicableNumbersSumRecTail' (a+1) (acc + a + b)
-    | otherwise = amicableNumbersSumRecTail' (a+1) acc
-        where b = divisionSumRecTail' a 1 0
-              sum_b = divisionSumRecTail' b 1 0 
+      sz <- readIORef (sizeRef st)
+      tb <- readIORef (tombRef st)
+      let capD = MV.length v
+          load = fromIntegral (sz + tb) / fromIntegral capD
+      when (load > loadFactorThreshold) $
+        rehash st (capD * 2)
+      return True
 ```
 
-Реализация через генерацию, фильтрацию и свёртку (generate/filter/reduce): 
+
+находим необходимый индекс (бакет), в случае превышения loadfactor
+перехэшируем всё множество. Находим необходимый бакет, если такого элемента еще нет то возвращаем обновленный бакет. 
+В силу иммутабельности структуры возвращаем новое множество. 
+
+
+
+**`delete`**
+
 ```haskell
-allVariants' = [(x, divisionSumRecTail' x 1 0) | x <- [1..10000]]
-
-targetCondition :: (Int, Int) -> Bool
-targetCondition (x, y) = (x /= y) && divisionSumRecTail' y 1 0 == x
-
-targetCasesFilter = filter targetCondition allVariants'
-
-finalSum = foldl (\acc (x, y) -> acc + x + y) 0 targetCasesFilter
+delete :: (Eq k, Hashable k) => OASet k -> k -> IO Bool
+delete st key = do
+  v <- readIORef (vecRef st)
+  let cap = MV.length v
+      start = hash key .&. (cap - 1)
+  probe v cap start 0
+  where
+    probe v cap i cnt
+      | cnt >= cap = return False
+      | otherwise = do
+          s <- MV.read v i
+          case s of
+            Empty -> return False
+            (Occupied k') | k' == key -> do
+              MV.write v i Deleted
+              modifyIORef' (sizeRef st) (subtract 1)
+              modifyIORef' (tombRef st) (+1)
+              return True
+            _ -> probe v cap ((i + 1) .&. (cap - 1)) (cnt + 1)
 
 ```
-Реализация через map
+
+аналогично addElement, но возвращается обновленная структура без заданного элемента.
+
+
+**`filterHS`**
 ```haskell
-checkCondition :: (Int, Int) -> Int
-checkCondition (x, y)
-    | x /= y && divisionSumRecTail' y 1 0 == x = x + y
-    | otherwise = 0
+filterHS :: (Hashable a) => (a -> Bool) -> HS a -> HS a
+filterHS p hs =
+  let (buckets', newSize) = filterBuckets p (buckets hs)
+      updated = hs {buckets = buckets', size = newSize}
+   in normalizeHS updated
+   
 
-mapTargerCases = map checkCondition allVariants' 
 
-targetCasesMap = sum mapTargerCases
+filterBuckets :: (a -> Bool) -> Buckets a -> (Buckets a, Int)
+filterBuckets _ BucketsNil = (BucketsNil, 0)
+filterBuckets p (BucketsCons bucket rest) =
+  let (bucket', keptInBucket) = filterBucket p bucket
+      (rest', keptInRest) = filterBuckets p rest
+   in (BucketsCons bucket' rest', keptInBucket + keptInRest)
 
+filterBucket :: (a -> Bool) -> Bucket a -> (Bucket a, Int)
+filterBucket _ BNil = (BNil, 0)
+filterBucket p (BCons y ys)
+  | p y =
+      let (ys', count) = filterBucket p ys
+       in (BCons y ys', count + 1)
+  | otherwise = filterBucket p ys
 ```
 
-Реализация через бесконечные списки: 
+оставляем те эелементы, которые соответствуют предикату.
+
+**`mapHS`**
 ```haskell
-divisionSum :: Int -> Int
-divisionSum n = sum [d | d <- [1..(n `div` 2)], n `mod` d == 0]
+mapHS :: (Hashable b) => (a -> b) -> HS a -> HS b
+mapHS f hs = normalizeHS (mapBuckets f (buckets hs) (emptyHS (bucketCount hs)))
 
-areAmicable :: Int -> Int -> Bool
-areAmicable a b = (a /= b) && (divisionSum a == b) && (divisionSum b == a)
+mapBuckets :: (Hashable b) => (a -> b) -> Buckets a -> HS b -> HS b
+mapBuckets _ BucketsNil acc = acc
+mapBuckets f (BucketsCons bucket rest) acc =
+  let acc' = mapBucket f bucket acc
+   in mapBuckets f rest acc'
 
-amicableNumbers :: [(Int, Int)]
-amicableNumbers = [(a, b) | a <- [1..10000], let b = divisionSum a, areAmicable a b]
-
-amicableNumbersSum :: Int
-amicableNumbersSum =
-    sum [a + b | (a, b) <- takeWhile (\(x, _) -> x <= 10000) amicableNumbers]
+mapBucket :: (Hashable b) => (a -> b) -> Bucket a -> HS b -> HS b
+mapBucket _ BNil acc = acc
+mapBucket f (BCons bucketHead bucketTail) acc =
+  let acc' = insertInternal True (f bucketHead) acc
+   in mapBucket f bucketTail acc'
 ```
 
-Реализация на Python: 
-```python
-def amicable_numbers_sum():
-    sum = 0
-    for a in range(1, 10001):
-        sum_a = 0
-        for division in range(1, a // 2 + 1):
-            if a % division == 0:
-                sum_a += division
-
-        sum_b = 0
-        for division in range(1, sum_a // 2 + 1):
-            if sum_a % division == 0:
-                sum_b += division
-
-        if a == sum_b and a != sum_a:
-            sum += a
-            sum += sum_a
-
-    return sum
+применяем функцию к элементам исходного множества и всталяем в новое множество (это необходимо для того, чтобы высчитать хэш на основе новых значений после применения функции)
 
 
-if __name__ == "__main__":
-    print(amicable_numbers_sum())
-```
-
-Реализация наиболее лаконична с использованием map и свёртывания, вариант через рекурсию даёт более быстрый результат, чем вариант, написанный на Python.
-
-
-## [Вторая задача](https://projecteuler.net/problem=9)
-
-Реализация через рекурсию:
+**`foldlHS/foldrHS`**
 ```haskell
-checkTripleRec' :: Int -> Int -> Int
-checkTripleRec' n m
-    | m >= 25 = 1
-    | n >= 25 = checkTripleRec' 0 (m + 1)
-    | 2 * m ^ 2 + 2 * m * n == 1000 = (m ^ 2 - n ^ 2) * 2 * m * n * (m ^ 2 + n ^ 2)
-    | otherwise = checkTripleRec' (n + 1) m
+foldlHS :: (b -> a -> b) -> b -> HS a -> b
+foldlHS f z hs = foldlBuckets f z (buckets hs)
 
+foldrHS :: (a -> b -> b) -> b -> HS a -> b
+foldrHS f z hs = foldrBuckets f z (buckets hs)
+
+foldlBuckets :: (b -> a -> b) -> b -> Buckets a -> b
+foldlBuckets _ acc BucketsNil = acc
+foldlBuckets f acc (BucketsCons bucket rest) =
+  let acc' = foldlBucket f acc bucket
+   in foldlBuckets f acc' rest
+
+foldlBucket :: (b -> a -> b) -> b -> Bucket a -> b
+foldlBucket _ acc BNil = acc
+foldlBucket f acc (BCons y ys) =
+  let acc' = f acc y
+   in foldlBucket f acc' ys
+
+foldrBuckets :: (a -> b -> b) -> b -> Buckets a -> b
+foldrBuckets _ acc BucketsNil = acc
+foldrBuckets f acc (BucketsCons bucket rest) =
+  let accRest = foldrBuckets f acc rest
+   in foldrBucket f accRest bucket
+
+foldrBucket :: (a -> b -> b) -> b -> Bucket a -> b
+foldrBucket _ acc BNil = acc
+foldrBucket f acc (BCons y ys) =
+  f y (foldrBucket f acc ys)
 ```
-Реализация через хвостовую рекурсию:
+
+
+
+
+## [Тестирование](test/Main.hs)
+### Unit-тесты (HUnit)
 ```haskell
-allVariantsPairs' :: [(Int, Int)]
-allVariantsPairs' = [(x, y) | x <- [1..25], y <- [1..25]]
-
-checkTripleRecTail :: [(Int, Int)] -> Int
-checkTripleRecTail [] = 1  
-checkTripleRecTail ((m, n) : xs)
-  | 2 * m ^ 2 + 2 * m * n == 1000 = (m ^ 2 - n ^ 2) * 2 * m * n * (m ^ 2 + n ^ 2)
-  | otherwise = checkTripleRecTail xs
+unitTests :: Test
+unitTests = TestList
+  [ TestLabel "insert" testInsertPreservesMembership
+  , TestLabel "delete" testDeleteRemovesMembership
+  , TestLabel "filter" testFilterKeepsOnlyMatching
+  , TestLabel "fold" testFoldAggregatesValues
+  ]
 ```
+Покрывают корректность вставки, удаления, фильтрации и свертки.
 
-Реализация через свертку (foldl):
+### Property-based (QuickCheck)
 ```haskell
-allVariants' = [(n, m) | n <- [1..25], m <- [1..25]]
-
-targetCondition :: (Int, Int) -> Bool
-targetCondition (n, m) = 2 * m ^ 2 + 2 * m * n == 1000
-
-targetCase = filter targetCondition allVariants'
-
-targetMul :: [(Int, Int)] -> Int
-targetMul = foldl (\acc (n, m) -> acc + (m ^ 2 - n ^ 2) * 2 * m * n * (m ^ 2 + n ^ 2)) 0
-
-checkTripleReduce = targetMul targetCase
+prop_monoidAssociativity :: IntSet -> IntSet -> IntSet -> Bool
+prop_monoidAssociativity (IntSet a) (IntSet b) (IntSet c) =
+  (a <> b) <> c == a <> (b <> c)
 ```
-Реализация через map
-```haskell
-checkCondition :: (Int, Int) -> Int
-checkCondition (n, m)
-    | 2 * m ^ 2 + 2 * m * n == 1000 = (m ^ 2 - n ^ 2) * 2 * m * n * (m ^ 2 + n ^ 2)
-    | otherwise = 0
+Свойства включают:
+- Левую и правую нейтральность `mempty`.
+- Ассоциативность `(<>)`.
+- Совпадение `filterHS` и `mapHS` с эталонным поведением списков.
 
-targetCases' = map checkCondition allVariants'
-getCase = filter (> 0) targetCases'
 
-checkTripleMap = head getCase
-```
-
-Реализация через бесконечные списки:
-```haskell
-allVariantsInf' = [(n, m) | n <- [1..], m <- [1..25]]
-
-isValidPair :: (Int, Int) -> Bool
-isValidPair (n, m) = 2 * m ^ 2 + 2 * m * n == 1000
-
-computeResult :: Maybe (Int, Int) -> Int
-computeResult (Just (n, m)) = (m ^ 2 - n ^ 2) * 2 * m * n * (m ^ 2 + n ^ 2)
-
-checkTripleInfinite :: Maybe (Int, Int)
-checkTripleInfinite = find isValidPair allVariantsInf'
-
-```
-
-Реализация на Python:
-```python
-def find_triple_cycle():
-    for n in range(25):
-        for m in range(25):
-            if 2 * m ** 2 + 2 * m * n == 1000:
-                return (m ** 2 - n ** 2) * 2 * m * n * (m ** 2 + n ** 2)
-            
-
-if __name__ == "__main__":
-    print(find_triple_cycle())
-```
-
-Прямолинейная реализация на Python наиболее простая, но вариант через реккурсию даёт более быстрый и понятный код
-
-# Итог 
-Haskell позволяет решать задачи лаконично и эффективно, но не всегда нагляднл, в сравнении с традиционными языками программирования 
+# Итог
+Создана неизменяемая полиморфная структура данных, удовлетворяющая требованиям моноида, с операциями добавления/удаления, фильтрации, отображения и сверток. Реализованы эффективное сравнение без преобразования к спискам и подробное тестирование: HUnit проверяет базовые сценарии, QuickCheck — свойства структуры и API.

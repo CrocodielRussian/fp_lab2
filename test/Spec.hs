@@ -1,177 +1,191 @@
+module Main (main) where
+
 import Test.HUnit
+import qualified Data.List as L
+import System.Exit (exitFailure, exitSuccess)
+
 import Structure
-import Data.List (sort)
+  ( Slots
+  , initSlots
+  , fromList
+  , getSize
+  , member
+  , insert
+  , delete
+  , toList
+  , mapOA
+  , foldlOA
+  , foldrOA
+  , filterOA
+  , powerTwo
+  )
+
+main :: IO ()
+main = do
+  c <- runTestTT tests
+  if errors c + failures c == 0 then exitSuccess else exitFailure
 
 tests :: Test
 tests = TestList
-    [ TestLabel "OASet basic operations" basicOps
-    , TestLabel "tombstone handling and rehash" tombstoneAndRehash
-    , TestLabel "stress insert/delete" stress
-    , TestLabel "Higher-order functions" higherOrderOps
-    ]
+  [ TestLabel "powerTwo edge cases" test_powerTwo
+  , TestLabel "initSlots empty" test_initSlots
+  , TestLabel "insert/member basic" test_insertMember
+  , TestLabel "insert duplicate" test_insertDuplicate
+  , TestLabel "delete present" test_deletePresent
+  , TestLabel "delete missing" test_deleteMissing
+  , TestLabel "toList/fromList set semantics" test_toListFromList
+  , TestLabel "stress insert many (resize/rehash)" test_stress
+  , TestLabel "map transforms elements" test_mapTransforms
+    , TestLabel "filter keeps matching elements" test_filterKeepsMatching
+    , TestLabel "filter removes all elements" test_filterRemovesAll
+    , TestLabel "foldl sums elements" test_foldlSums
+    , TestLabel "foldr concatenates strings" test_foldrConcats
+    , TestLabel "foldl on empty set" test_foldlEmpty
+    , TestLabel "map on empty set" test_mapEmpty
+  ]
 
-basicOps :: Test
-basicOps =
-  TestList
-    [ TestLabel "insert and member" $ TestCase $ do
-        s <- newOASet 4
-        b1 <- insert s "hello"
-        assertEqual "insert returns True" True b1
-        mem <- member s "hello"
-        assertEqual "member returns True" True mem
+test_powerTwo :: Test
+test_powerTwo = TestCase $ do
+  powerTwo 0 @?= 1
+  powerTwo 1 @?= 1
+  powerTwo 2 @?= 2
+  powerTwo 3 @?= 4
+  powerTwo 4 @?= 4
+  powerTwo 5 @?= 8
+  powerTwo 9 @?= 16
 
-    , TestLabel "insert duplicate returns False and does not increase size" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "x"
-        r <- insert s "x"
-        assertEqual "duplicate insert returns False" False r
-        sz <- size s
-        assertEqual "size stays 1" 1 sz
+test_initSlots :: Test
+test_initSlots = TestCase $ do
+  let s = initSlots 8 :: Slots Int
+  getSize s @?= 0
+  member s 123 @?= False
 
-    , TestLabel "delete existing and non-existing" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "a"
-        ok1 <- delete s "a"
-        assertEqual "delete existing returns True" True ok1
-        ok2 <- delete s "a"
-        assertEqual "delete non-existing returns False" False ok2
-        memAfter <- member s "a"
-        assertEqual "member after delete is False" False memAfter
+test_insertMember :: Test
+test_insertMember = TestCase $ do
+  let s0 = initSlots 8 :: Slots Int
+  let (s1, ok) = insert s0 42
+  ok @?= True
+  getSize s1 @?= 1
+  member s1 42 @?= True
 
-    , TestLabel "toList returns all elements (unordered)" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "one"
-        _ <- insert s "two"
-        lst <- toList s
-        assertEqual "toList contains all elements" (sort ["one", "two"]) (sort lst)
-    ]
+test_insertDuplicate :: Test
+test_insertDuplicate = TestCase $ do
+  let s0 = initSlots 8 :: Slots Int
+  let (s1, ok1) = insert s0 7
+  let (s2, ok2) = insert s1 7
+  ok1 @?= True
+  ok2 @?= False
+  getSize s2 @?= 1
 
-tombstoneAndRehash :: Test
-tombstoneAndRehash =
-  TestList
-    [ TestLabel "inserting after delete keeps set consistent" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "a"
-        _ <- insert s "b"
-        _ <- delete s "a"
+test_deletePresent :: Test
+test_deletePresent = TestCase $ do
+  let s0 = fromList 8 [1,2,3,4,5] :: Slots Int
+  let (s1, ok) = delete s0 3
+  ok @?= True
+  member s1 3 @?= False
+  getSize s1 @?= 4
 
-        sz1 <- size s
-        assertEqual "size after delete" 1 sz1
+test_deleteMissing :: Test
+test_deleteMissing = TestCase $ do
+  let s0 = fromList 8 [1,2,3] :: Slots Int
+  let (s1, ok) = delete s0 999
+  ok @?= False
+  getSize s1 @?= 3
 
-        _ <- insert s "c"
-        sz2 <- size s
-        assertEqual "size after insert" 2 sz2
+test_toListFromList :: Test
+test_toListFromList = TestCase $ do
+  let xs  = [10,10,20,30,20,40]
+  let s   = fromList 8 xs :: Slots Int
+  let got = L.sort (toList s)
+  let exp = L.sort (L.nub xs)
+  got @?= exp
+  getSize s @?= length exp
 
-        mb <- member s "b"
-        mc <- member s "c"
-        assertEqual "b present" True mb
-        assertEqual "c present" True mc
+test_stress :: Test
+test_stress = TestCase $ do
+  let xs = [1..3000] <> [1..1500]
+  let s  = fromList 2 xs :: Slots Int
+  getSize s @?= 3000
+  mapM_ (\k -> assertBool ("expected member " <> show k) (member s k))
+        [1,2,3,10,999,1500,2999,3000]
+  mapM_ (\k -> assertBool ("expected NOT member " <> show k) (not (member s k)))
+        [0,3001,4000]
 
-    , TestLabel "rehash preserves all elements when load factor exceeded" $ TestCase $ do
-        s <- newOASet 2
-        _ <- insert s "k1"
-        _ <- insert s "k2"
-        _ <- insert s "k3"
+test_mapTransforms :: Test
+test_mapTransforms = TestCase $ do
+  let s0 = initSlots 4
+  let (s1, _) = insert s0 "3"
+  let (s2, _) = insert s1 "1"
+  let (s3, _) = insert s2 "2"
 
-        allPresent <- mapM (member s) ["k1", "k2", "k3"]
-        assertEqual "all keys present" [True, True, True] allPresent
+  let s'  = mapOA (\x -> read x + 1 :: Int) s3
+  let lst = toList s'
+  assertEqual "mapped elements are correct" [4, 2, 3]  lst
 
-        sz <- size s
-        assertEqual "size is 3" 3 sz
-    ]
+  let sz = getSize s'
+  assertEqual "getSize remains same" 3 sz
 
-stress :: Test
-stress =
-  TestLabel "many inserts and deletes keep invariants" $ TestCase $ do
-    s <- newOASet 8
-    let keys = map show ([1 .. 100] :: [Int])
+test_filterKeepsMatching :: Test
+test_filterKeepsMatching = TestCase $ do
+  let s0 = initSlots 4
+  let (s1, _) = insert s0 "apple"
+  let (s2, _) = insert s1 "banana"
+  let (s3, _) = insert s2 "apricot"
 
-    mapM_ (insert s) keys
-    sz1 <- size s
-    assertEqual "size after inserts" (length keys) sz1
+  let s'  = filterOA (\x -> head x == 'a') s3
+  let lst = toList s'
+  assertEqual "filtered elements are correct"  ["apple", "apricot"] lst
 
-    mapM_ (delete s . show) ([1 .. 50] :: [Int])
-    sz2 <- size s
-    assertEqual "size after deletes" 50 sz2
+  let sz = getSize s'
+  assertEqual "getSize is 2" 2 sz
 
-    present <- mapM (member s . show) ([51 .. 100] :: [Int])
-    assertEqual "remaining keys present" (replicate 50 True) present
+test_filterRemovesAll :: Test
+test_filterRemovesAll = TestCase $ do
+  let s0 = initSlots 4
+  let (s1, _) = insert s0 "apple"
+  let (s2, _) = insert s1 "banana"
 
-higherOrderOps :: Test
-higherOrderOps =
-  TestList
-    [ TestLabel "map transforms elements" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "1"
-        _ <- insert s "2"
-        _ <- insert s "3"
-        s' <- mapOA (\x -> read x + 1 :: Int) s
-        lst <- toList s'
-        assertEqual "mapped elements are correct" (sort [2, 3, 4]) (sort lst)
-        sz <- size s'
-        assertEqual "size remains same" 3 sz
+  let s'  = filterOA (\x -> head x == 'c') s2
+  let lst = toList s'
+  assertEqual "all elements removed" [] lst
 
-    -- , TestLabel "map handles duplicates after mapping" $ TestCase $ do
-    --     s <- newOASet 4
-    --     _ <- insert s "a"
-    --     _ <- insert s "b"
-    --     s' <- mapOA (\_ -> "x") s
-    --     lst <- toList s'
-    --     assertEqual "mapped elements collapse to unique" ["x"] lst
-    --     sz <- size s'
-    --     assertEqual "size is 1 due to collapse" 1 sz
+  let sz = getSize s'
+  assertEqual "getSize is 0" 0 sz
 
-    , TestLabel "filter keeps matching elements" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "apple"
-        _ <- insert s "banana"
-        _ <- insert s "apricot"
-        s' <- filterOA (\x -> head x == 'a') s
-        lst <- toList s'
-        assertEqual "filtered elements are correct" (sort ["apple", "apricot"]) (sort lst)
-        sz <- size s'
-        assertEqual "size is 2" 2 sz
+test_foldlSums :: Test
+test_foldlSums = TestCase $ do
+  let s0 = initSlots 4
+  let (s1, _) = insert s0 (1 :: Int)
+  let (s2, _) = insert s1 2
+  let (s3, _) = insert s2 3
 
-    , TestLabel "filter removes all elements" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "apple"
-        _ <- insert s "banana"
-        s' <- filterOA (\x -> head x == 'c') s
-        lst <- toList s'
-        assertEqual "all elements removed" [] lst
-        sz <- size s'
-        assertEqual "size is 0" 0 sz
+  let sumVal = foldlOA (+) 0 s3
+  assertEqual "foldl sums correctly" 6 sumVal
 
-    , TestLabel "foldl sums elements" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s (1 :: Int)
-        _ <- insert s 2
-        _ <- insert s 3
-        sumVal <- foldlOA (+) 0 s
-        assertEqual "foldl sums correctly" 6 sumVal
+test_foldrConcats :: Test
+test_foldrConcats = TestCase $ do
+  let s0 = initSlots 4
+  let (s1, _) = insert s0 "a"
+  let (s2, _) = insert s1 "b"
+  let (s3, _) = insert s2 "c"
 
-    , TestLabel "foldr concatenates strings" $ TestCase $ do
-        s <- newOASet 4
-        _ <- insert s "a"
-        _ <- insert s "b"
-        _ <- insert s "c"
+  let concatStr = foldrOA (++) "" s3
+  assertBool
+    "foldr concatenates correctly"
+    (all (`elem` concatStr) "abc" && length concatStr == 3)
 
-        concatStr <- foldrOA (++) "" s
-        assertBool "foldr concatenates correctly" (all (`elem` concatStr) ['a', 'b', 'c'] && length concatStr == 3)
+test_foldlEmpty :: Test
+test_foldlEmpty = TestCase $ do
+  let s = initSlots 4
+  let sumVal = foldlOA (+) 0 s
+  assertEqual "foldl on empty set is initial value" 0 sumVal
 
-    , TestLabel "foldl on empty set" $ TestCase $ do
-        s <- newOASet 4
-        sumVal <- foldlOA (+) 0 s
-        assertEqual "foldl on empty set is initial value" 0 sumVal
+test_mapEmpty :: Test
+test_mapEmpty = TestCase $ do
+  let s  = initSlots 4
+  let s' = mapOA (\x -> read x + 1 :: Int) s
+  let lst = toList s'
+  assertEqual "map on empty set is empty" [] lst
 
-    , TestLabel "map on empty set" $ TestCase $ do
-        s <- newOASet 4
-        s' <- mapOA (\x -> read x + 1 :: Int) s
-        lst <- toList s'
-        assertEqual "map on empty set is empty" [] lst
-        sz <- size s'
-        assertEqual "size is 0" 0 sz
-    ]
-
-main :: IO Counts
-main = runTestTT tests
+  let sz = getSize s'
+  assertEqual "getSize is 0" 0 sz

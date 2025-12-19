@@ -34,4 +34,3 @@ tests:
       - base
       - HUnit
       - fp-lab2
-      #  - hspec

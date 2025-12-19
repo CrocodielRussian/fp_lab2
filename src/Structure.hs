@@ -1,8 +1,8 @@
 module Structure
-  ( OASet
-  , newOASet
+  ( Slots
+  , initSlots
   , fromList
-  , size
+  , getSize
   , member
   , insert
   , delete
@@ -14,29 +14,63 @@ module Structure
   , foldrOA
   ) where
 
-import Control.Monad (forM_, forM, when)
-import Data.Hashable (Hashable, hash)
-import Data.IORef (IORef, newIORef, readIORef, writeIORef, modifyIORef')
-import qualified Data.Vector.Mutable as MV
-import Data.Vector.Mutable (IOVector)
-import Prelude
-import Data.Maybe (fromMaybe)
-import Control.Applicative ((<|>))
-import Data.Bits ((.&.))
+import Data.Bits
+import Data.Hashable
+import qualified Data.Vector as V
+import Data.Vector (Vector)
 
 
-data Slot k = Empty | Deleted | Occupied k
-  deriving (Show, Eq)
+data State = Empty | Deleted | Occupied
+  deriving (Eq, Show)
+
+data Slot k = Slot
+  { slotState :: State
+  , slotKey   :: k
+  } deriving (Show)
 
 
-data OASet k = OASet
-  { vecRef    :: IORef (IOVector (Slot k)) 
-  , sizeRef   :: IORef Int                 
-  , tombRef   :: IORef Int                 
-  }
+data Slots k = Slots
+  { capacity   :: Int
+  , size       :: Int
+  , tombstones :: Int
+  , slots      :: Vector (Slot k)
+  } deriving (Show)
+
+startIndex :: Hashable k => Slots k -> k -> Int
+startIndex s k =
+  hash k .&. (capacity s - 1) 
 
 loadFactorThreshold :: Double
 loadFactorThreshold = 0.7
+
+
+resize :: (Eq k, Hashable k) => Slots k -> Int -> Slots k
+resize st newCap =
+  V.foldl' reinsert empty (slots st)
+  where
+    empty =
+      Slots newCap 0 0 (V.replicate newCap emptySlot)
+
+    reinsert acc (Slot Occupied k) =
+      fst (oaInsertRaw acc k)
+    reinsert acc _ =
+      acc
+
+oaBalance :: (Eq k, Hashable k) => Slots k -> Slots k
+oaBalance s
+  | load > loadFactorThreshold =
+      resize s (capacity s * 2)
+
+  | tombstones s > size s =
+      rehash s
+
+  | otherwise =
+      s
+  where
+    load =
+      fromIntegral (size s + tombstones s)
+        / fromIntegral (capacity s)
+
 
 logN :: Int -> Int
 logN n = ceiling (logBase 2 (fromIntegral n :: Double)) + 1
@@ -54,151 +88,184 @@ powerTwo n
                then search (mid + 1) r
                else search l mid
 
+emptySlot :: Slot k
+emptySlot = Slot Empty undefined
 
-newOASet :: Int -> IO (OASet k)
-newOASet n = do
-  let cap = max 1 (powerTwo n)
-  v <- MV.replicate cap Empty
-  vr <- newIORef v
-  sr <- newIORef 0
-  tr <- newIORef 0
-  return $ OASet vr sr tr
+initSlots :: Int -> Slots k
+initSlots n = do
+  Slots
+    { capacity   = n
+    , size       = 0
+    , tombstones = 0
+    , slots      = V.replicate n emptySlot
+    }
 
-fromList :: (Eq k, Hashable k) => [k] -> IO (OASet k)
-fromList xs = do
-  s <- newOASet (max 16 (length xs * 2))
-  forM_ xs (insert s)
-  return s
+getSize :: Slots k -> Int
+getSize s = size s
 
-size :: OASet k -> IO Int
-size st = readIORef (sizeRef st)
-
-rehash :: (Eq k, Hashable k) => OASet k -> Int -> IO ()
-rehash st newCap = do
-  oldV <- readIORef (vecRef st)
-  let oldCap = MV.length oldV
-  keys <- fmap concat $ forM [0 .. oldCap - 1] $ \i -> do
-    s <- MV.read oldV i
-    case s of
-      Occupied k -> return [k]
-      _ -> return []
-  newV <- MV.replicate newCap Empty
-  writeIORef (vecRef st) newV
-  writeIORef (sizeRef st) 0
-  writeIORef (tombRef st) 0
-  forM_ keys $ \k -> do
-    _ <- insert st k
-    return ()
-
-member :: (Eq k, Hashable k) => OASet k -> k -> IO Bool
-member st key = do
-  v <- readIORef (vecRef st)
-  let cap = MV.length v
-      start = hash key .&. (cap - 1)
-  probe v cap start 0
+rehash :: (Eq k, Hashable k) => Slots k -> Slots k
+rehash s = do
+  V.foldl' reinsert empty (slots s)
   where
-    probe v cap i cnt
-      | cnt >= cap = return False
-      | otherwise = do
-          s <- MV.read v i
-          case s of
-            Empty -> return False
-            Occupied k' | k' == key -> return True
-            _ -> probe v cap ((i + 1) .&. (cap - 1)) (cnt + 1)
+    cap = capacity s
+
+    empty =
+      Slots cap 0 0 (V.replicate cap emptySlot)
+
+    reinsert acc (Slot Occupied k) =
+      fst (oaInsertRaw acc k)
+    reinsert acc _ =
+      acc
+
+member :: (Eq k, Hashable k) => Slots k -> k -> Bool
+member st key = go (startIndex st key) 0
+  where
+    cap = capacity st
+
+    go i probe
+      | probe >= cap = False
+      | otherwise =
+          case slots st V.! i of
+            Slot Empty _ -> False
+            Slot Occupied k
+              | k == key -> True
+              | otherwise -> next
+            _ -> next
+      where
+        next = go ((i + 1) .&. (cap - 1)) (probe + 1)
 
 
-probeInsert :: (Eq k, Hashable k) => IOVector (Slot k) -> Int -> Int -> Int -> Maybe Int -> k -> IO (Either Bool Int)
-probeInsert v cap i cnt firstDel key
-  | cnt >= cap = case firstDel of
-      Just d  -> return (Right d)
-      Nothing -> return (Left False)
-  | otherwise = do
-      s <- MV.read v i
-      case s of
-        Empty -> return $ Right (fromMaybe i firstDel)
-        Occupied k'
-          | k' == key -> return (Left True)
-          | otherwise  -> probeInsert v cap ((i + 1) .&. (cap - 1)) (cnt + 1) firstDel key
-        Deleted ->
-          probeInsert v cap ((i + 1) .&. (cap - 1)) (cnt + 1) (firstDel <|> Just i) key
 
-insert :: (Eq k, Hashable k) => OASet k -> k -> IO Bool
-insert st key = do
-  v <- readIORef (vecRef st)
-  let cap = MV.length v
-      start = hash key .&. (cap - 1)
-  res <- probeInsert v cap start 0 Nothing key
-  case res of
-    Left True -> return False
-    Left False -> do
-      rehash st (cap * 2)
-      insert st key
-    Right pos -> do
-      prev <- MV.read v pos
-      when (prev == Deleted) $ modifyIORef' (tombRef st) (subtract 1)
-      MV.write v pos (Occupied key)
-      modifyIORef' (sizeRef st) (+1)
+oaInsertRaw :: Hashable k => Slots k -> k -> (Slots k, Bool)
+oaInsertRaw st key = go (startIndex st key) 0
+  where
+    cap = capacity st
 
-      sz <- readIORef (sizeRef st)
-      tb <- readIORef (tombRef st)
-      let capD = MV.length v
-          load = fromIntegral (sz + tb) / fromIntegral capD
-      when (load > loadFactorThreshold) $
-        rehash st (capD * 2)
-      return True
+    go i probe
+      | probe >= cap = (st, False)
+      | otherwise =
+          case slots st V.! i of
+            Slot Occupied _ ->
+              go ((i + 1) .&. (cap - 1)) (probe + 1)
+
+            _ ->
+              ( st { size  = size st + 1
+                  , slots = slots st V.// [(i, Slot Occupied key)]
+                  }
+              , True
+              )
+
+insert :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
+insert st key = insertLoop (oaBalance st) key
+
+insertLoop :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
+insertLoop s key = go (startIndex s key) 0 Nothing
+  where
+    cap = capacity s
+
+    go i probe firstDel
+      | probe >= cap = (s, False)
+      | otherwise =
+          case slots s V.! i of
+            Slot Empty _ ->
+              let pos = maybe i id firstDel
+               in ( s { size       = size s + 1
+                      , tombstones =
+                          if firstDel == Nothing
+                          then tombstones s
+                          else tombstones s - 1
+                      , slots =
+                          slots s V.// [(pos, Slot Occupied key)]
+                      }
+                  , True
+                  )
+
+            Slot Deleted _ ->
+              go ((i + 1) .&. (cap - 1))
+                 (probe + 1)
+                 (case firstDel of
+                    Nothing -> Just i
+                    _       -> firstDel)
+
+            Slot Occupied k
+              | k == key -> (s, False)
+              | otherwise ->
+                  go ((i + 1) .&. (cap - 1))
+                     (probe + 1)
+                     firstDel
 
 
-delete :: (Eq k, Hashable k) => OASet k -> k -> IO Bool
+delete :: (Eq k, Hashable k) =>  Slots k -> k -> (Slots k, Bool)
 delete st key = do
-  v <- readIORef (vecRef st)
-  let cap = MV.length v
-      start = hash key .&. (cap - 1)
-  probe v cap start 0
+    case deleteLoop st key of
+      (s', True)  -> (oaBalance s', True)
+      result     -> result
+
+deleteLoop :: (Eq k, Hashable k) => Slots k -> k -> (Slots k, Bool)
+deleteLoop s key = go (startIndex s key) 0
   where
-    probe v cap i cnt
-      | cnt >= cap = return False
-      | otherwise = do
-          s <- MV.read v i
-          case s of
-            Empty -> return False
-            (Occupied k') | k' == key -> do
-              MV.write v i Deleted
-              modifyIORef' (sizeRef st) (subtract 1)
-              modifyIORef' (tombRef st) (+1)
-              return True
-            _ -> probe v cap ((i + 1) .&. (cap - 1)) (cnt + 1)
+    cap = capacity s
+
+    go i probe
+      | probe >= cap = (s, False)
+      | otherwise =
+          case slots s V.! i of
+            Slot Empty _ ->
+              (s, False)
+
+            Slot Occupied k
+              | k == key ->
+                  ( s { size       = size s - 1
+                      , tombstones = tombstones s + 1
+                      , slots =
+                          slots s V.// [(i, Slot Deleted undefined)]
+                      }
+                  , True
+                  )
+
+            _ ->
+              go ((i + 1) .&. (cap - 1)) (probe + 1)
+
+toList :: Slots k -> [k]
+toList s =
+  foldrOA (:) [] s
+
+fromList :: (Eq k, Hashable k) => Int -> [k] -> Slots k
+fromList cap =
+  foldl (\acc k -> fst (insert acc k)) (initSlots cap)
+
+foldlOA :: (a -> k -> a) -> a -> Slots k -> a
+foldlOA f z s = 
+    V.foldl' step z (slots s)
+  where
+    step acc (Slot Occupied k) = f acc k
+    step acc _                = acc
+
+foldrOA :: (k -> a -> a) -> a -> Slots k -> a
+foldrOA f z s = 
+  V.foldr step z (slots s)
+  where
+    step (Slot Occupied k) acc = f k acc
+    step _ acc                = acc
 
 
-toList :: OASet k -> IO [k]
-toList st = do
-  v <- readIORef (vecRef st)
-  let cap = MV.length v
-  fmap concat $ forM [0 .. cap - 1] $ \i -> do
-    s <- MV.read v i
-    case s of
-      Occupied k -> return [k]
-      _ -> return []
+filterOA :: (Eq k, Hashable k) => (k -> Bool) -> Slots k -> Slots k
+filterOA p s =
+  rehash $
+    foldlOA step (initSlots (capacity s)) s
+  where
+    step acc k
+      | p k       = fst (oaInsertRaw acc k)
+      | otherwise = acc
 
-mapOA :: (Eq a, Hashable a, Eq b, Hashable b) => (a -> b) -> OASet a -> IO (OASet b)
-mapOA f s = do
-  xs <- toList s
-  t  <- newOASet (max 4 (length xs * 2))
-  forM_ (map f xs) (insert t)
-  pure t
+mapOA :: (Eq k2, Hashable k2)
+      => (k1 -> k2)
+      -> Slots k1
+      -> Slots k2
+mapOA f s =
+  rehash $
+    foldlOA step (initSlots (capacity s)) s
+  where
+    step acc k =
+      fst (oaInsertRaw acc (f k))
 
-filterOA :: (Eq a, Hashable a) => (a -> Bool) -> OASet a -> IO (OASet a)
-filterOA p s = do
-  xs <- toList s
-  t  <- newOASet (max 4 (length xs * 2))
-  forM_ (filter p xs) (insert t)
-  pure t
-
-foldlOA :: (b -> a -> b) -> b -> OASet a -> IO b
-foldlOA f z s = do
-  xs <- toList s
-  pure (foldl f z xs)
-
-foldrOA :: (a -> b -> b) -> b -> OASet a -> IO b
-foldrOA f z s = do
-  xs <- toList s
-  pure (foldr f z xs)
