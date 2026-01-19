@@ -2,12 +2,11 @@ module Structure
   ( Slots
   , initSlots
   , fromList
-  , getSize
+  , size
   , member
   , insert
   , delete
   , toList
-  , powerTwo
   , mapOA
   , filterOA
   , foldlOA
@@ -17,8 +16,15 @@ module Structure
 import Data.Bits
 import Data.Hashable
 import Data.Maybe
-import qualified Data.Vector as V
 import Data.Vector (Vector)
+import qualified Data.Vector as V
+import qualified Data.Foldable as F
+import qualified Data.Set as S
+import Data.List (nub, foldl')
+import Prelude hiding (lookup)
+
+import Test.QuickCheck.Arbitrary
+
 
 
 data State = Empty | Deleted | Occupied
@@ -29,10 +35,9 @@ data Slot k = Slot
   , slotKey   :: k
   } deriving (Show)
 
-
 data Slots k = Slots
   { capacity   :: Int
-  , size       :: Int
+  , slotsSize  :: Int
   , tombstones :: Int
   , slots      :: Vector (Slot k)
   } deriving (Show)
@@ -62,14 +67,14 @@ oaBalance s
   | load > loadFactorThreshold =
       resize s (capacity s * 2)
 
-  | tombstones s > size s =
+  | tombstones s > slotsSize s =
       rehash s
 
   | otherwise =
       s
   where
     load =
-      fromIntegral (size s + tombstones s)
+      fromIntegral (slotsSize s + tombstones s)
         / fromIntegral (capacity s)
 
 
@@ -96,13 +101,13 @@ initSlots :: Int -> Slots k
 initSlots n = do
   Slots
     { capacity   = n
-    , size       = 0
+    , slotsSize       = 0
     , tombstones = 0
     , slots      = V.replicate n emptySlot
     }
 
-getSize :: Slots k -> Int
-getSize = size
+size :: Slots k -> Int
+size = slotsSize
 
 rehash :: (Eq k, Hashable k) => Slots k -> Slots k
 rehash s = do
@@ -150,7 +155,7 @@ oaInsertRaw st key = go (startIndex st key) 0
               go ((i + 1) .&. (cap - 1)) (probe + 1)
 
             _ ->
-              ( st { size  = size st + 1
+              ( st { slotsSize  = slotsSize st + 1
                   , slots = slots st V.// [(i, Slot Occupied key)]
                   }
               , True
@@ -170,7 +175,7 @@ insertLoop s key = go (startIndex s key) 0 Nothing
           case slots s V.! i of
             Slot Empty _ ->
               let pos = Data.Maybe.fromMaybe i firstDel
-               in ( s { size       = size s + 1
+               in ( s { slotsSize       = slotsSize s + 1
                       , tombstones =
                           if isNothing firstDel
                           then tombstones s
@@ -216,7 +221,7 @@ deleteLoop s key = go (startIndex s key) 0
 
             Slot Occupied k
               | k == key ->
-                  ( s { size       = size s - 1
+                  ( s { slotsSize       = slotsSize s - 1
                       , tombstones = tombstones s + 1
                       , slots =
                           slots s V.// [(i, Slot Deleted undefined)]
@@ -228,40 +233,24 @@ deleteLoop s key = go (startIndex s key) 0
               go ((i + 1) .&. (cap - 1)) (probe + 1)
 
 toList :: Slots k -> [k]
-toList = foldrOA (:) []
+toList = F.toList
 
-fromList :: (Eq k, Hashable k) => Int -> [k] -> Slots k
-fromList cap =
-  foldl (\acc k -> fst (insert acc k)) (initSlots cap)
+fromList :: (Eq k, Hashable k) => [k] -> Slots k
+fromList xs =
+  let uniq = nub xs
+      cap = powerTwo (max 1 (length uniq * 2))
+  in foldl' (\acc k -> fst (oaInsertRaw acc k)) (initSlots cap) uniq
 
 foldlOA :: (a -> k -> a) -> a -> Slots k -> a
-foldlOA f z s = 
-    V.foldl' step z (slots s)
-  where
-    step acc (Slot Occupied k) = f acc k
-    step acc _                = acc
+foldlOA = foldl 
 
-foldrOA :: (k -> a -> a) -> a -> Slots k -> a
-foldrOA f z s = 
-  V.foldr step z (slots s)
-  where
-    step (Slot Occupied k) acc = f k acc
-    step _ acc                = acc
-
+foldrOA :: (a -> b -> b) -> b -> Slots a -> b
+foldrOA = foldr
 
 filterOA :: (Eq k, Hashable k) => (k -> Bool) -> Slots k -> Slots k
-filterOA p s =
-  rehash $
-    foldlOA step (initSlots (capacity s)) s
-  where
-    step acc k
-      | p k       = fst (oaInsertRaw acc k)
-      | otherwise = acc
+filterOA p s = fromList (filter p (toList s))
 
-mapOA :: (Eq k2, Hashable k2)
-      => (k1 -> k2)
-      -> Slots k1
-      -> Slots k2
+mapOA :: (Eq k2, Hashable k2) => (k1 -> k2) -> Slots k1 -> Slots k2
 mapOA f s =
   rehash $
     foldlOA step (initSlots (capacity s)) s
@@ -269,3 +258,29 @@ mapOA f s =
     step acc k =
       fst (oaInsertRaw acc (f k))
 
+mergeOA :: (Eq a, Hashable a) => Slots a -> Slots a -> Slots a
+mergeOA lhs rhs =
+  let a' = oaBalance lhs
+      b' = oaBalance rhs
+      total = slotsSize a' + slotsSize b'
+      cap = powerTwo (max 1 (total * 2)) 
+      base = initSlots cap
+      elems = F.toList a' ++ F.toList b'
+      merged = foldl' (\acc k -> fst (oaInsertRaw acc k)) base elems
+  in oaBalance merged
+
+instance (Eq a, Hashable a) => Semigroup (Slots a) where
+  (<>) = mergeOA
+
+instance (Eq a, Hashable a) => Monoid (Slots a) where
+  mempty = initSlots 10
+  mappend = (<>)
+
+instance Foldable Slots where
+  foldr f z d = foldr f z (toList d)
+
+instance (Arbitrary a, Hashable a) => Arbitrary (Slots a) where
+  arbitrary = fromList . nub <$> arbitrary
+
+instance (Eq a, Hashable a, Ord a) => Eq (Slots a) where
+  s1 == s2 = S.fromList (toList s1) == S.fromList (toList s2)
