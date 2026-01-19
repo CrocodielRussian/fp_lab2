@@ -1,8 +1,7 @@
 name: Haskell CI
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - ".github/workflows/*"
       - "**/*.hs"
@@ -10,25 +9,25 @@ on:
       - "stack.yaml"
       - "package.yaml"
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
       - ".github/workflows/*"
       - "**/*.hs"
       - "**/*.cabal"
       - "stack.yaml"
       - "package.yaml"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: haskell/actions/setup@v2
+      - uses: haskell-actions/setup@v2
         with:
-          ghc-version: 9.10.3
+          ghc-version: "9.10.3"
           enable-stack: true
       - name: install hlint
-        run: stack install hlint 
+        run: stack install hlint
       - name: run lint
         run: hlint src/*.hs
 
@@ -37,25 +36,24 @@ jobs:
     needs: [lint]
     steps:
       - uses: actions/checkout@v4
-      - uses: haskell/actions/setup@v2
+      - uses: haskell-actions/setup@v2
         with:
-          ghc-version: 9.10.3
+          ghc-version: "9.10.3"
           enable-stack: true
       - name: install ormolu
         run: stack install ormolu
       - name: auto format
         run: ormolu -i src/*.hs
-      - name: run formatter cheks
+      - name: run formatter checks
         run: ormolu --mode check src/*.hs
-      
 
   test:
     needs: [format]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: haskell/actions/setup@v2
+      - uses: haskell-actions/setup@v2
         with:
-          ghc-version: 9.10.3
+          ghc-version: "9.10.3"
           enable-stack: true
       - run: stack test
