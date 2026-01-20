@@ -7,6 +7,7 @@ import qualified Data.Foldable as F
 import qualified Data.Set as S
 import Data.List (nub, foldl')
 import Prelude hiding (lookup)
+import Control.Applicative ((<|>))
 import Test.QuickCheck.Arbitrary
 
 data State = Empty | Deleted | Occupied
