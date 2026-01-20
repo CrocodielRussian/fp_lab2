@@ -277,7 +277,11 @@ instance (Eq a, Hashable a) => Monoid (Slots a) where
   mappend = (<>)
 
 instance Foldable Slots where
-  foldr f z d = foldr f z (toList d)
+  foldr f z s =
+    V.foldr step z (slots s)
+    where
+      step (Slot Occupied k) acc = f k acc
+      step _                 acc = acc
 
 instance (Arbitrary a, Hashable a) => Arbitrary (Slots a) where
   arbitrary = fromList . nub <$> arbitrary
