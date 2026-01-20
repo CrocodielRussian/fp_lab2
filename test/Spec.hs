@@ -1,6 +1,5 @@
 module Main (main) where
 
-import Control.Monad (unless)
 import Test.HUnit hiding (Testable)
 import Test.QuickCheck
 import qualified Data.List as L
@@ -38,17 +37,19 @@ check name prop = do
 main :: IO ()
 main = do
   c <- runTestTT tests
-  if errors c + failures c == 0 then exitSuccess else exitFailure
-  ok <- and <$> sequence
-    [ check "Monoid: left identity" prop_monoid_leftId
-    , check "Monoid: right identity" prop_monoid_rightId
-    , check "Eq: set equivalence" prop_eq_set_equiv
-    , check "Semigroup: associativity" prop_semigroup_assoc
-    , check "Monoid: left identity" prop_monoid_leftId
-    , check "Monoid: right identity" prop_monoid_rightId
-    , check "Foldable: toList -> set equivalence" prop_foldable_toSet
-    ]
+
+  ok <- if errors c + failures c == 0
+          then and <$> sequence
+                 [ check "Monoid: left identity"  prop_monoid_leftId
+                 , check "Monoid: right identity" prop_monoid_rightId
+                 , check "Eq: set equivalence"    prop_eq_set_equiv
+                 , check "Semigroup: associativity" prop_semigroup_assoc
+                 , check "Foldable: toList -> set equivalence" prop_foldable_toSet
+                 ]
+          else pure False
+
   if ok then exitSuccess else exitFailure
+
 
 tests :: Test
 tests = TestList
